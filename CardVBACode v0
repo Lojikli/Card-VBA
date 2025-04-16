@@ -1,0 +1,673 @@
+Option Explicit
+
+'=====================================================================
+' CAC Card Barcode Parser for Excel
+'=====================================================================
+' This VBA module parses both PDF417 (front) and Code39 (back) barcodes 
+' from CAC cards when scanned into Excel. The code automatically detects
+' the barcode type and extracts relevant personnel information.
+'
+' HOW TO USE:
+' 1. Add this code to a worksheet module (right-click sheet tab > View Code)
+' 2. Scan the barcode into the designated input cell (default: A1)
+' 3. The parsed data will appear in cells C3:D14
+' 4. Add to database button will store the data in a separate sheet
+'=====================================================================
+
+'=====================================================================
+' CONFIGURATION SECTION - Modify these values as needed
+'=====================================================================
+' Cell where barcode data is scanned into
+Private Const INPUT_CELL As String = "A1"
+
+' Markers to identify barcode format
+Private Const PDF417_MARKER As String = "PDF"
+Private Const CODE39_MARKER As String = "CODE39"
+
+' Name of the log sheet that records all actions
+Private Const LOG_SHEET_NAME As String = "Log"
+
+' Starting row for displaying parsed results
+Private Const RESULT_STARTING_ROW As Integer = 3
+
+' Name of the database sheet
+Private Const DATABASE_SHEET_NAME As String = "CACDatabase"
+
+'=====================================================================
+' DATA TYPES AND ENUMERATIONS
+'=====================================================================
+' Enum for barcode types
+Enum BarcodeType
+    PDF417_Front = 1
+    Code39_Back = 2
+    Unknown = 0
+End Enum
+
+' Structure to hold parsed CAC data
+Private Type CACData
+    FirstName As String
+    MiddleName As String
+    LastName As String
+    Rank As String
+    Branch As String
+    PayGrade As String
+    EDIPI As String    ' DoD ID Number / Electronic Data Interchange Personal Identifier
+    ExpirationDate As Date
+    IssueDate As Date
+    BloodType As String
+    BarcodeType As BarcodeType
+    RawData As String
+    IsValid As Boolean
+End Type
+
+'=====================================================================
+' MAIN EVENT HANDLER - Triggers when data is entered
+'=====================================================================
+' Worksheet event to trigger when data is entered into the input cell
+Private Sub Worksheet_Change(ByVal Target As Range)
+    ' Only process if the change is in the input cell
+    If Target.Address = Range(INPUT_CELL).Address Then
+        ' Check if the cell is not empty
+        If Not IsEmpty(Target) Then
+            ' Process the barcode data
+            ProcessCACBarcode Target.Value
+        End If
+    End If
+End Sub
+
+'=====================================================================
+' MAIN PROCESSING FUNCTIONS
+'=====================================================================
+' Main function to process barcode data
+Public Sub ProcessCACBarcode(barcodeData As String)
+    Dim cacInfo As CACData
+    Dim barcodeType As BarcodeType
+    
+    ' Initialize the data structure
+    cacInfo.IsValid = False
+    cacInfo.RawData = barcodeData
+    
+    ' Identify the barcode type
+    barcodeType = IdentifyBarcodeType(barcodeData)
+    cacInfo.BarcodeType = barcodeType
+    
+    ' Parse the data based on barcode type
+    On Error Resume Next
+    Select Case barcodeType
+        Case BarcodeType.PDF417_Front
+            ParsePDF417Data barcodeData, cacInfo
+        Case BarcodeType.Code39_Back
+            ParseCode39Data barcodeData, cacInfo
+        Case Else
+            LogMessage "Unknown barcode format: " & Left(barcodeData, 50) & "..."
+    End Select
+    
+    ' Check for parsing errors
+    If Err.Number <> 0 Then
+        LogMessage "Error parsing barcode: " & Err.Description
+        Err.Clear
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    ' Display the parsed data in the worksheet
+    DisplayCACData cacInfo
+    
+    ' Log the successful scan
+    If cacInfo.IsValid Then
+        LogMessage "Successfully parsed " & IIf(barcodeType = BarcodeType.PDF417_Front, "PDF417", "Code39") & " barcode for " & cacInfo.LastName & ", " & cacInfo.FirstName
+    Else
+        LogMessage "Failed to parse barcode data: " & Left(barcodeData, 50) & "..."
+    End If
+End Sub
+
+' Function to identify the type of barcode based on content pattern
+Private Function IdentifyBarcodeType(barcodeData As String) As BarcodeType
+    ' Make sure we have data to analyze
+    If Len(Trim(barcodeData)) = 0 Then
+        IdentifyBarcodeType = BarcodeType.Unknown
+        Exit Function
+    End If
+    
+    ' Check for PDF417 format (typically has header format with delimiters)
+    If InStr(1, barcodeData, "@") > 0 Or InStr(1, barcodeData, "\n") > 0 Or _
+       InStr(1, barcodeData, "PDF") > 0 Or InStr(1, barcodeData, "ANSI ") > 0 Then
+        IdentifyBarcodeType = BarcodeType.PDF417_Front
+        Exit Function
+    End If
+    
+    ' Check for Code 39 format (typically simpler numeric string)
+    If IsNumeric(Replace(barcodeData, " ", "")) Or _
+       (Len(barcodeData) <= 20 And IsNumeric(Left(barcodeData, 10))) Then
+        IdentifyBarcodeType = BarcodeType.Code39_Back
+        Exit Function
+    End If
+    
+    ' Default to unknown if we can't determine the type
+    IdentifyBarcodeType = BarcodeType.Unknown
+End Function
+
+'=====================================================================
+' BARCODE DATA PARSING FUNCTIONS
+'=====================================================================
+' Function to parse PDF417 barcode data from front of CAC
+Private Sub ParsePDF417Data(barcodeData As String, ByRef cacInfo As CACData)
+    Dim lines() As String
+    Dim i As Integer
+    Dim currLine As String
+    Dim fieldCode As String
+    Dim fieldValue As String
+    
+    ' Replace any non-standard line breaks
+    barcodeData = Replace(barcodeData, "\n", vbCrLf)
+    barcodeData = Replace(barcodeData, "\r", vbCrLf)
+    
+    ' Split the data by line breaks
+    lines = Split(barcodeData, vbCrLf)
+    
+    ' Initialize the parsing flags
+    cacInfo.IsValid = False
+    
+    ' Process each line
+    For i = 0 To UBound(lines)
+        currLine = Trim(lines(i))
+        
+        ' Skip empty lines
+        If Len(currLine) = 0 Then
+            GoTo ContinueLoop
+        End If
+        
+        ' Look for specific field markers
+        ' DAA = Full Name
+        If Left(currLine, 3) = "DAA" Then
+            cacInfo.LastName = ExtractLastName(Mid(currLine, 4))
+            cacInfo.FirstName = ExtractFirstName(Mid(currLine, 4))
+            cacInfo.MiddleName = ExtractMiddleName(Mid(currLine, 4))
+            cacInfo.IsValid = True
+        
+        ' DAB = Branch
+        ElseIf Left(currLine, 3) = "DAB" Then
+            cacInfo.Branch = Trim(Mid(currLine, 4))
+        
+        ' DAC = Rank
+        ElseIf Left(currLine, 3) = "DAC" Then
+            cacInfo.Rank = Trim(Mid(currLine, 4))
+        
+        ' DAG = Pay Grade
+        ElseIf Left(currLine, 3) = "DAG" Then
+            cacInfo.PayGrade = Trim(Mid(currLine, 4))
+        
+        ' DAK = EDIPI/DoD ID
+        ElseIf Left(currLine, 3) = "DAK" Then
+            cacInfo.EDIPI = Trim(Mid(currLine, 4))
+        
+        ' DAQ = EDIPI/DoD ID (Alternative location)
+        ElseIf Left(currLine, 3) = "DAQ" Then
+            cacInfo.EDIPI = Trim(Mid(currLine, 4))
+            
+        ' DAI = Blood Type
+        ElseIf Left(currLine, 3) = "DAI" Then
+            cacInfo.BloodType = Trim(Mid(currLine, 4))
+            
+        ' DDG = Issue Date
+        ElseIf Left(currLine, 3) = "DDG" Then
+            cacInfo.IssueDate = ParseDateValue(Mid(currLine, 4))
+            
+        ' DDE = Expiration Date 
+        ElseIf Left(currLine, 3) = "DDE" Then
+            cacInfo.ExpirationDate = ParseDateValue(Mid(currLine, 4))
+        End If
+        
+        ' Also check the ANSI line which may contain EDIPI after "DLDAQ"
+        If InStr(1, currLine, "DLDAQ") > 0 Then
+            Dim startPos As Integer
+            startPos = InStr(1, currLine, "DLDAQ") + 5
+            If startPos > 5 Then
+                ' Extract up to 10 digits after DLDAQ
+                Dim edipiPart As String
+                edipiPart = Mid(currLine, startPos, 10)
+                ' Only use this if we don't already have an EDIPI
+                If Len(cacInfo.EDIPI) = 0 And IsNumeric(edipiPart) Then
+                    cacInfo.EDIPI = edipiPart
+                End If
+            End If
+        End If
+        
+ContinueLoop:
+    Next i
+End Sub
+
+' Function to parse Code 39 barcode data from back of CAC
+Private Sub ParseCode39Data(barcodeData As String, ByRef cacInfo As CACData)
+    ' Clean the barcode data
+    barcodeData = Trim(Replace(barcodeData, " ", ""))
+    
+    ' Code 39 typically contains just the EDIPI/DoD ID
+    If IsNumeric(barcodeData) And Len(barcodeData) >= 8 And Len(barcodeData) <= 12 Then
+        cacInfo.EDIPI = barcodeData
+        cacInfo.IsValid = True
+    Else
+        ' Try to extract numeric ID if embedded in other text
+        Dim i As Long
+        Dim j As Long
+        Dim numericPart As String
+        
+        For i = 1 To Len(barcodeData)
+            If IsNumeric(Mid(barcodeData, i, 1)) Then
+                ' Found start of numeric sequence
+                For j = i To Len(barcodeData)
+                    If Not IsNumeric(Mid(barcodeData, j, 1)) Then
+                        Exit For
+                    End If
+                Next j
+                
+                ' Check if we found a valid length EDIPI
+                numericPart = Mid(barcodeData, i, j - i)
+                If Len(numericPart) >= 8 And Len(numericPart) <= 12 Then
+                    cacInfo.EDIPI = numericPart
+                    cacInfo.IsValid = True
+                    Exit For
+                End If
+                
+                ' Move i to continue search
+                i = j
+            End If
+        Next i
+    End If
+End Sub
+
+'=====================================================================
+' NAME PARSING HELPER FUNCTIONS
+'=====================================================================
+' Helper function to extract last name from full name
+Private Function ExtractLastName(fullName As String) As String
+    Dim nameParts() As String
+    nameParts = Split(fullName, ",")
+    
+    If UBound(nameParts) >= 0 Then
+        ExtractLastName = Trim(nameParts(0))
+    Else
+        ExtractLastName = fullName
+    End If
+End Function
+
+' Helper function to extract first name from full name
+Private Function ExtractFirstName(fullName As String) As String
+    Dim nameParts() As String
+    nameParts = Split(fullName, ",")
+    
+    If UBound(nameParts) >= 1 Then
+        ' First name might have middle name attached
+        Dim firstMiddleParts() As String
+        firstMiddleParts = Split(Trim(nameParts(1)), " ")
+        
+        If UBound(firstMiddleParts) >= 0 Then
+            ExtractFirstName = Trim(firstMiddleParts(0))
+        Else
+            ExtractFirstName = Trim(nameParts(1))
+        End If
+    Else
+        ExtractFirstName = ""
+    End If
+End Function
+
+' Helper function to extract middle name from full name
+Private Function ExtractMiddleName(fullName As String) As String
+    Dim nameParts() As String
+    nameParts = Split(fullName, ",")
+    
+    If UBound(nameParts) >= 1 Then
+        ' Get first and potentially middle names
+        Dim firstMiddleParts() As String
+        firstMiddleParts = Split(Trim(nameParts(1)), " ")
+        
+        If UBound(firstMiddleParts) >= 1 Then
+            ' Combine all parts after the first as middle name(s)
+            Dim middleName As String
+            Dim i As Integer
+            
+            middleName = firstMiddleParts(1)
+            For i = 2 To UBound(firstMiddleParts)
+                middleName = middleName & " " & firstMiddleParts(i)
+            Next i
+            
+            ExtractMiddleName = Trim(middleName)
+        Else
+            ExtractMiddleName = ""
+        End If
+    Else
+        ExtractMiddleName = ""
+    End If
+End Function
+
+' Helper function to parse dates from barcode
+Private Function ParseDateValue(dateString As String) As Date
+    On Error Resume Next
+    
+    ' Try standard format YYYYMMDD
+    If Len(dateString) >= 8 And IsNumeric(dateString) Then
+        ParseDateValue = DateSerial(Left(dateString, 4), Mid(dateString, 5, 2), Right(dateString, 2))
+    Else
+        ' Try other date formats
+        ParseDateValue = CDate(dateString)
+    End If
+    
+    If Err.Number <> 0 Then
+        ParseDateValue = DateSerial(1900, 1, 1) ' Default date
+        Err.Clear
+    End If
+    
+    On Error GoTo 0
+End Function
+
+'=====================================================================
+' DISPLAY FUNCTIONS
+'=====================================================================
+' Function to display parsed CAC data in the worksheet
+Private Sub DisplayCACData(cacInfo As CACData)
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+    
+    ' Clear previous results
+    ws.Range("C" & RESULT_STARTING_ROW & ":D20").ClearContents
+    
+    ' Display field labels
+    ws.Cells(RESULT_STARTING_ROW, 3).Value = "Last Name:"
+    ws.Cells(RESULT_STARTING_ROW + 1, 3).Value = "First Name:"
+    ws.Cells(RESULT_STARTING_ROW + 2, 3).Value = "Middle Name:"
+    ws.Cells(RESULT_STARTING_ROW + 3, 3).Value = "Rank:"
+    ws.Cells(RESULT_STARTING_ROW + 4, 3).Value = "Branch:"
+    ws.Cells(RESULT_STARTING_ROW + 5, 3).Value = "Pay Grade:"
+    ws.Cells(RESULT_STARTING_ROW + 6, 3).Value = "DoD ID (EDIPI):"
+    ws.Cells(RESULT_STARTING_ROW + 7, 3).Value = "Blood Type:"
+    ws.Cells(RESULT_STARTING_ROW + 8, 3).Value = "Issue Date:"
+    ws.Cells(RESULT_STARTING_ROW + 9, 3).Value = "Expiration Date:"
+    ws.Cells(RESULT_STARTING_ROW + 10, 3).Value = "Barcode Type:"
+    ws.Cells(RESULT_STARTING_ROW + 11, 3).Value = "Valid Scan:"
+    
+    ' Display data values
+    ws.Cells(RESULT_STARTING_ROW, 4).Value = cacInfo.LastName
+    ws.Cells(RESULT_STARTING_ROW + 1, 4).Value = cacInfo.FirstName
+    ws.Cells(RESULT_STARTING_ROW + 2, 4).Value = cacInfo.MiddleName
+    ws.Cells(RESULT_STARTING_ROW + 3, 4).Value = cacInfo.Rank
+    ws.Cells(RESULT_STARTING_ROW + 4, 4).Value = cacInfo.Branch
+    ws.Cells(RESULT_STARTING_ROW + 5, 4).Value = cacInfo.PayGrade
+    ws.Cells(RESULT_STARTING_ROW + 6, 4).Value = cacInfo.EDIPI
+    ws.Cells(RESULT_STARTING_ROW + 7, 4).Value = cacInfo.BloodType
+    
+    ' Format and display dates
+    If Year(cacInfo.IssueDate) > 1900 Then
+        ws.Cells(RESULT_STARTING_ROW + 8, 4).Value = cacInfo.IssueDate
+        ws.Cells(RESULT_STARTING_ROW + 8, 4).NumberFormat = "mm/dd/yyyy"
+    End If
+    
+    If Year(cacInfo.ExpirationDate) > 1900 Then
+        ws.Cells(RESULT_STARTING_ROW + 9, 4).Value = cacInfo.ExpirationDate
+        ws.Cells(RESULT_STARTING_ROW + 9, 4).NumberFormat = "mm/dd/yyyy"
+    End If
+    
+    ' Display barcode type
+    Select Case cacInfo.BarcodeType
+        Case BarcodeType.PDF417_Front
+            ws.Cells(RESULT_STARTING_ROW + 10, 4).Value = "PDF417 (Front)"
+        Case BarcodeType.Code39_Back
+            ws.Cells(RESULT_STARTING_ROW + 10, 4).Value = "Code 39 (Back)"
+        Case Else
+            ws.Cells(RESULT_STARTING_ROW + 10, 4).Value = "Unknown"
+    End Select
+    
+    ' Display validity
+    ws.Cells(RESULT_STARTING_ROW + 11, 4).Value = IIf(cacInfo.IsValid, "Yes", "No")
+    
+    ' Format the display area
+    ws.Range("C" & RESULT_STARTING_ROW & ":C" & (RESULT_STARTING_ROW + 11)).Font.Bold = True
+    ws.Range("C" & RESULT_STARTING_ROW & ":D" & (RESULT_STARTING_ROW + 11)).Borders.LineStyle = xlContinuous
+    
+    ' Clear the input cell for next scan
+    ws.Range(INPUT_CELL).ClearContents
+    
+    ' Position cursor back to input cell for next scan
+    ws.Range(INPUT_CELL).Select
+End Sub
+
+'=====================================================================
+' LOGGING FUNCTIONS
+'=====================================================================
+' Function to log messages to the log sheet
+Private Sub LogMessage(message As String)
+    On Error Resume Next
+    
+    Dim logWs As Worksheet
+    Dim lastRow As Long
+    
+    ' Check if log sheet exists, create if not
+    If SheetExists(LOG_SHEET_NAME) Then
+        Set logWs = ThisWorkbook.Sheets(LOG_SHEET_NAME)
+    Else
+        Set logWs = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        logWs.Name = LOG_SHEET_NAME
+        
+        ' Set up log headers
+        logWs.Cells(1, 1).Value = "Timestamp"
+        logWs.Cells(1, 2).Value = "Message"
+        logWs.Range("A1:B1").Font.Bold = True
+    End If
+    
+    ' Find the next available row
+    lastRow = logWs.Cells(logWs.Rows.Count, 1).End(xlUp).Row + 1
+    
+    ' Add log entry
+    logWs.Cells(lastRow, 1).Value = Now
+    logWs.Cells(lastRow, 1).NumberFormat = "mm/dd/yyyy hh:mm:ss"
+    logWs.Cells(lastRow, 2).Value = message
+    
+    ' Format row
+    logWs.Cells(lastRow, 1).Resize(1, 2).Borders.LineStyle = xlContinuous
+    
+    On Error GoTo 0
+End Sub
+
+'=====================================================================
+' DATABASE FUNCTIONS
+'=====================================================================
+' Function to add current CAC data to database sheet
+Public Sub AddToDatabase()
+    Dim ws As Worksheet
+    Dim dbWs As Worksheet
+    Dim lastRow As Long
+    Dim rangeToAdd As Range
+    
+    Set ws = ActiveSheet
+    
+    ' Check if database sheet exists, create if not
+    If SheetExists(DATABASE_SHEET_NAME) Then
+        Set dbWs = ThisWorkbook.Sheets(DATABASE_SHEET_NAME)
+    Else
+        Set dbWs = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        dbWs.Name = DATABASE_SHEET_NAME
+        
+        ' Set up database headers
+        dbWs.Cells(1, 1).Value = "Timestamp"
+        dbWs.Cells(1, 2).Value = "Last Name"
+        dbWs.Cells(1, 3).Value = "First Name"
+        dbWs.Cells(1, 4).Value = "Middle Name"
+        dbWs.Cells(1, 5).Value = "Rank"
+        dbWs.Cells(1, 6).Value = "Branch"
+        dbWs.Cells(1, 7).Value = "Pay Grade"
+        dbWs.Cells(1, 8).Value = "DoD ID (EDIPI)"
+        dbWs.Cells(1, 9).Value = "Blood Type"
+        dbWs.Cells(1, 10).Value = "Issue Date"
+        dbWs.Cells(1, 11).Value = "Expiration Date"
+        dbWs.Cells(1, 12).Value = "Barcode Type"
+        
+        dbWs.Range("A1:L1").Font.Bold = True
+        dbWs.Range("A1:L1").Borders.LineStyle = xlContinuous
+    End If
+    
+    ' Find the next available row
+    lastRow = dbWs.Cells(dbWs.Rows.Count, 1).End(xlUp).Row + 1
+    
+    ' Add the current data to the database
+    dbWs.Cells(lastRow, 1).Value = Now
+    dbWs.Cells(lastRow, 2).Value = ws.Cells(RESULT_STARTING_ROW, 4).Value     ' Last Name
+    dbWs.Cells(lastRow, 3).Value = ws.Cells(RESULT_STARTING_ROW + 1, 4).Value ' First Name
+    dbWs.Cells(lastRow, 4).Value = ws.Cells(RESULT_STARTING_ROW + 2, 4).Value ' Middle Name
+    dbWs.Cells(lastRow, 5).Value = ws.Cells(RESULT_STARTING_ROW + 3, 4).Value ' Rank
+    dbWs.Cells(lastRow, 6).Value = ws.Cells(RESULT_STARTING_ROW + 4, 4).Value ' Branch
+    dbWs.Cells(lastRow, 7).Value = ws.Cells(RESULT_STARTING_ROW + 5, 4).Value ' Pay Grade
+    dbWs.Cells(lastRow, 8).Value = ws.Cells(RESULT_STARTING_ROW + 6, 4).Value ' EDIPI
+    dbWs.Cells(lastRow, 9).Value = ws.Cells(RESULT_STARTING_ROW + 7, 4).Value ' Blood Type
+    dbWs.Cells(lastRow, 10).Value = ws.Cells(RESULT_STARTING_ROW + 8, 4).Value ' Issue Date
+    dbWs.Cells(lastRow, 11).Value = ws.Cells(RESULT_STARTING_ROW + 9, 4).Value ' Expiration Date
+    dbWs.Cells(lastRow, 12).Value = ws.Cells(RESULT_STARTING_ROW + 10, 4).Value ' Barcode Type
+    
+    ' Format the data
+    dbWs.Cells(lastRow, 1).NumberFormat = "mm/dd/yyyy hh:mm:ss"
+    If IsDate(dbWs.Cells(lastRow, 10).Value) Then dbWs.Cells(lastRow, 10).NumberFormat = "mm/dd/yyyy"
+    If IsDate(dbWs.Cells(lastRow, 11).Value) Then dbWs.Cells(lastRow, 11).NumberFormat = "mm/dd/yyyy"
+    
+    ' Format the row
+    dbWs.Cells(lastRow, 1).Resize(1, 12).Borders.LineStyle = xlContinuous
+    
+    ' Log the action
+    LogMessage "Added CAC data for " & dbWs.Cells(lastRow, 2).Value & ", " & dbWs.Cells(lastRow, 3).Value & " to database"
+    
+    ' Notify user
+    MsgBox "Added record to CAC database.", vbInformation, "Record Added"
+End Sub
+
+'=====================================================================
+' UTILITY FUNCTIONS
+'=====================================================================
+' Helper function to check if a sheet exists
+Private Function SheetExists(sheetName As String) As Boolean
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets(sheetName)
+    On Error GoTo 0
+    
+    SheetExists = Not ws Is Nothing
+End Function
+
+' Reset the input cell if needed
+Public Sub ResetInputCell()
+    ActiveSheet.Range(INPUT_CELL).ClearContents
+    ActiveSheet.Range(INPUT_CELL).Select
+End Sub
+
+'=====================================================================
+' USER INTERFACE FUNCTIONS - Add these if you want buttons
+'=====================================================================
+' Create a "Save to Database" button on the worksheet
+Public Sub CreateDatabaseButton()
+    Dim btn As Button
+    
+    On Error Resume Next
+    
+    ' Add a button to add to database
+    Set btn = ActiveSheet.Buttons.Add(400, 10, 120, 30)
+    If Err.Number <> 0 Then
+        MsgBox "Could not create button. Make sure you have permission to modify the worksheet.", vbExclamation
+        Exit Sub
+    End If
+    
+    With btn
+        .Caption = "Save to Database"
+        .OnAction = "AddToDatabase"
+        .Name = "btnAddToDatabase"
+    End With
+    
+    On Error GoTo 0
+End Sub
+
+' Create a "Reset Input" button on the worksheet
+Public Sub CreateResetButton()
+    Dim btn As Button
+    
+    On Error Resume Next
+    
+    ' Add a button to reset input
+    Set btn = ActiveSheet.Buttons.Add(400, 50, 120, 30)
+    If Err.Number <> 0 Then
+        MsgBox "Could not create button. Make sure you have permission to modify the worksheet.", vbExclamation
+        Exit Sub
+    End If
+    
+    With btn
+        .Caption = "Reset Input"
+        .OnAction = "ResetInputCell"
+        .Name = "btnResetInput"
+    End With
+    
+    On Error GoTo 0
+End Sub
+
+'=====================================================================
+' SETUP FUNCTIONS
+'=====================================================================
+' Initialize the worksheet for CAC scanning
+Public Sub SetupCACScanner()
+    Dim ws As Worksheet
+    Set ws = ActiveSheet
+    
+    ' Clear the worksheet
+    ws.Cells.ClearContents
+    
+    ' Set up the title
+    ws.Range("A1:D1").Merge
+    ws.Range("A1").Value = "CAC Card Barcode Scanner"
+    ws.Range("A1").Font.Size = 16
+    ws.Range("A1").Font.Bold = True
+    ws.Range("A1").HorizontalAlignment = xlCenter
+    
+    ' Set up the input area
+    ws.Range("A2").Value = "Scan Barcode Here:"
+    ws.Range("A2").Font.Bold = True
+    ws.Range("B2").Value = ""
+    ws.Range(INPUT_CELL).Select
+    
+    ' Set up results area headers
+    ws.Range("C3").Value = "Last Name:"
+    ws.Range("C4").Value = "First Name:"
+    ws.Range("C5").Value = "Middle Name:"
+    ws.Range("C6").Value = "Rank:"
+    ws.Range("C7").Value = "Branch:"
+    ws.Range("C8").Value = "Pay Grade:"
+    ws.Range("C9").Value = "DoD ID (EDIPI):"
+    ws.Range("C10").Value = "Blood Type:"
+    ws.Range("C11").Value = "Issue Date:"
+    ws.Range("C12").Value = "Expiration Date:"
+    ws.Range("C13").Value = "Barcode Type:"
+    ws.Range("C14").Value = "Valid Scan:"
+    ws.Range("C3:C14").Font.Bold = True
+    
+    ' Format the worksheet
+    ws.Columns("A:D").AutoFit
+    ws.Range("A1:D14").Borders.LineStyle = xlContinuous
+    
+    ' Add buttons
+    CreateDatabaseButton
+    CreateResetButton
+    
+    ' Create the log sheet if it doesn't exist
+    If Not SheetExists(LOG_SHEET_NAME) Then
+        Dim logWs As Worksheet
+        Set logWs = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        logWs.Name = LOG_SHEET_NAME
+        
+        ' Set up log headers
+        logWs.Cells(1, 1).Value = "Timestamp"
+        logWs.Cells(1, 2).Value = "Message"
+        logWs.Range("A1:B1").Font.Bold = True
+    End If
+    
+    ' Log setup
+    LogMessage "CAC Scanner worksheet initialized"
+    
+    ' Return to scanner sheet
+    ws.Activate
+    ws.Range(INPUT_CELL).Select
+    
+    MsgBox "CAC Scanner has been set up. Scan a CAC barcode into cell " & INPUT_CELL & ".", vbInformation, "Setup Complete"
+End Sub
