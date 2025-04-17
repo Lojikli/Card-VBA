@@ -1,0 +1,771 @@
+Option Explicit
+
+' ===================================================
+' MILITARY PERSONNEL ACCOUNTABILITY SYSTEM (MPAS)
+' ===================================================
+' This VBA application creates a professional military accountability
+' dashboard that allows for ID card scanning/input with auto-population
+' of personnel data from the Data sheet.
+' ===================================================
+
+' Global Variables
+Dim wsData As Worksheet
+Dim wsDashboard As Worksheet
+Dim wsScanner As Worksheet
+Dim wsReports As Worksheet
+Dim currentLocation As String
+
+' ===================================================
+' INITIALIZATION PROCEDURES
+' ===================================================
+
+Sub InitializeMPAS()
+    ' Initialize the MPAS application
+    
+    Application.ScreenUpdating = False
+    
+    ' Set worksheet references
+    Set wsData = ThisWorkbook.Sheets("Data")
+    Set wsDashboard = ThisWorkbook.Sheets("Dashboard")
+    Set wsScanner = ThisWorkbook.Sheets("Scanner")
+    Set wsReports = ThisWorkbook.Sheets("Reports")
+    
+    ' Set initial location
+    currentLocation = "MAIN BASE - PERSCO STATION"
+    
+    ' Initialize the dashboard
+    Call SetupWorksheets
+    Call CreateDashboardUI
+    Call CreateScannerUI
+    Call CreateReportsUI
+    Call UpdateDashboardStats
+    
+    Application.ScreenUpdating = True
+    
+    ' Display welcome message
+    MsgBox "Military Personnel Accountability System (MPAS) initialized successfully.", vbInformation, "MPAS v3.5.2"
+    
+    ' Navigate to Dashboard
+    wsDashboard.Activate
+End Sub
+
+Sub SetupWorksheets()
+    ' Setup the structure of all worksheets
+    
+    ' Clear existing content
+    wsDashboard.Cells.Clear
+    wsScanner.Cells.Clear
+    wsReports.Cells.Clear
+    
+    ' Set up common header for all sheets
+    Dim ws As Worksheet
+    For Each ws In Array(wsDashboard, wsScanner, wsReports)
+        With ws
+            ' Header
+            .Range("A1:M1").Merge
+            .Range("A1").Value = "MILITARY PERSONNEL ACCOUNTABILITY SYSTEM (MPAS)"
+            .Range("A1").Font.Bold = True
+            .Range("A1").Font.Size = 16
+            .Range("A1").HorizontalAlignment = xlCenter
+            
+            ' Create navigation menu
+            .Range("A3").Value = "DASHBOARD"
+            .Range("C3").Value = "ID SCANNER"
+            .Range("E3").Value = "REPORTS"
+            
+            .Range("A3:A3").Font.Bold = True
+            .Range("C3:C3").Font.Bold = True
+            .Range("E3:E3").Font.Bold = True
+            
+            ' Highlight the active tab
+            Select Case .Name
+                Case "Dashboard"
+                    .Range("A3").Interior.Color = RGB(59, 130, 246)
+                Case "Scanner"
+                    .Range("C3").Interior.Color = RGB(59, 130, 246)
+                Case "Reports"
+                    .Range("E3").Interior.Color = RGB(59, 130, 246)
+            End Select
+            
+            ' Add click events (these are assigned separately in the CreateXUI subs)
+            
+            ' Create location selector
+            .Range("A5").Value = "CURRENT LOCATION:"
+            .Range("B5").Value = currentLocation
+            .Range("B5").Font.Bold = True
+            .Range("B5").Interior.Color = RGB(30, 58, 138)
+            .Range("B5").Font.Color = RGB(255, 255, 255)
+            
+            ' Add footer
+            .Range("A50:M50").Merge
+            .Range("A50").Value = "MPAS v3.5.2 | CLASSIFICATION: UNCLASSIFIED | " & Format(Now, "dd MMM yyyy") & " | " & Format(Now, "HH:mm") & " ZULU"
+            .Range("A50").Font.Size = 8
+            .Range("A50").Font.Color = RGB(156, 163, 175)
+            .Range("A50").HorizontalAlignment = xlCenter
+        End With
+    Next ws
+End Sub
+
+' ===================================================
+' DASHBOARD PROCEDURES
+' ===================================================
+
+Sub CreateDashboardUI()
+    ' Create the Dashboard UI elements
+    
+    With wsDashboard
+        ' Personnel Status Box
+        .Range("A7").Value = "PERSONNEL STATUS"
+        .Range("A7").Font.Bold = True
+        .Range("A7").Font.Color = RGB(147, 197, 253)
+        
+        .Range("A8").Value = "ACCOUNTABILITY RATE:"
+        
+        ' Add progress indicator area
+        .Range("A9").Value = "ACCOUNTED:"
+        .Range("C9").Value = GetAccountedCount()
+        
+        .Range("A10").Value = "TOTAL:"
+        .Range("C10").Value = GetTotalPersonnel()
+        
+        .Range("E9").Value = GetAccountabilityPercentage() & "%"
+        .Range("E9").Font.Bold = True
+        .Range("E9").Font.Size = 20
+        
+        ' Activity Log
+        .Range("A15").Value = "REAL-TIME ACTIVITY LOG"
+        .Range("A15").Font.Bold = True
+        .Range("A15").Font.Color = RGB(147, 197, 253)
+        
+        ' Create header row for activity log
+        .Range("A16").Value = "ID"
+        .Range("B16").Value = "NAME"
+        .Range("C16").Value = "STATUS"
+        .Range("D16").Value = "TIME"
+        .Range("E16").Value = "LOCATION"
+        
+        .Range("A16:E16").Font.Bold = True
+        .Range("A16:E16").Interior.Color = RGB(31, 41, 55)
+        
+        ' Populate activity log with recent entries
+        PopulateActivityLog
+    End With
+    
+    ' Apply event handlers
+    With wsDashboard.Buttons.Add(96, 86, 80, 25)
+        .OnAction = "NavigateToDashboard"
+        .Caption = "REFRESH"
+        .Name = "RefreshDashboardBtn"
+    End With
+    
+    With wsDashboard.Buttons.Add(320, 86, 80, 25)
+        .OnAction = "NavigateToScanner"
+        .Caption = "SCAN ID"
+        .Name = "ScanIDBtn"
+    End With
+End Sub
+
+Sub PopulateActivityLog()
+    ' Populate the activity log with recent entries from the data
+    
+    Dim lastRow As Long
+    Dim i As Long, j As Long
+    Dim logStartRow As Long
+    
+    logStartRow = 17
+    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    
+    ' Find personnel with activity records
+    j = 0
+    For i = 2 To lastRow
+        If Not IsEmpty(wsData.Cells(i, "P").Value) Then ' Assuming column P has the timestamp
+            j = j + 1
+            If j > 10 Then Exit For ' Show only the last 10 entries
+            
+            wsDashboard.Cells(logStartRow + j - 1, 1).Value = wsData.Cells(i, "A").Value ' ID
+            wsDashboard.Cells(logStartRow + j - 1, 2).Value = wsData.Cells(i, "B").Value & " " & wsData.Cells(i, "C").Value ' Name
+            wsDashboard.Cells(logStartRow + j - 1, 3).Value = wsData.Cells(i, "O").Value ' Status
+            wsDashboard.Cells(logStartRow + j - 1, 4).Value = Format(wsData.Cells(i, "P").Value, "HHmm") ' Time
+            wsDashboard.Cells(logStartRow + j - 1, 5).Value = wsData.Cells(i, "Q").Value ' Location
+            
+            ' Format based on status
+            If UCase(wsData.Cells(i, "O").Value) = "ACCOUNTED" Then
+                wsDashboard.Cells(logStartRow + j - 1, 3).Interior.Color = RGB(0, 100, 0)
+                wsDashboard.Cells(logStartRow + j - 1, 3).Font.Color = RGB(200, 255, 200)
+            Else
+                wsDashboard.Cells(logStartRow + j - 1, 3).Interior.Color = RGB(100, 100, 0)
+                wsDashboard.Cells(logStartRow + j - 1, 3).Font.Color = RGB(255, 255, 200)
+            End If
+        End If
+    Next i
+End Sub
+
+Function GetAccountedCount() As Long
+    ' Return the count of personnel who are accounted for
+    
+    Dim lastRow As Long
+    Dim i As Long
+    Dim count As Long
+    
+    count = 0
+    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    
+    For i = 2 To lastRow
+        If UCase(wsData.Cells(i, "O").Value) = "ACCOUNTED" Then
+            count = count + 1
+        End If
+    Next i
+    
+    GetAccountedCount = count
+End Function
+
+Function GetTotalPersonnel() As Long
+    ' Return the total count of personnel in the database
+    
+    Dim lastRow As Long
+    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    
+    GetTotalPersonnel = lastRow - 1 ' Subtract header row
+End Function
+
+Function GetAccountabilityPercentage() As Long
+    ' Calculate and return the accountability percentage
+    
+    Dim accounted As Long
+    Dim total As Long
+    
+    accounted = GetAccountedCount()
+    total = GetTotalPersonnel()
+    
+    If total = 0 Then
+        GetAccountabilityPercentage = 0
+    Else
+        GetAccountabilityPercentage = Round((accounted / total) * 100)
+    End If
+End Function
+
+Sub UpdateDashboardStats()
+    ' Update all dashboard statistics
+    
+    wsDashboard.Range("C9").Value = GetAccountedCount()
+    wsDashboard.Range("C10").Value = GetTotalPersonnel()
+    wsDashboard.Range("E9").Value = GetAccountabilityPercentage() & "%"
+    
+    ' Format progress indicator based on percentage
+    Dim pct As Long
+    pct = GetAccountabilityPercentage()
+    
+    If pct < 90 Then
+        wsDashboard.Range("E9").Font.Color = RGB(245, 158, 11) ' Yellow for < 90%
+    Else
+        wsDashboard.Range("E9").Font.Color = RGB(16, 185, 129) ' Green for >= 90%
+    End If
+    
+    ' Update location display
+    wsDashboard.Range("B5").Value = currentLocation
+    wsScanner.Range("B5").Value = currentLocation
+    wsReports.Range("B5").Value = currentLocation
+    
+    ' Refresh activity log
+    PopulateActivityLog
+End Sub
+
+' ===================================================
+' SCANNER PROCEDURES
+' ===================================================
+
+Sub CreateScannerUI()
+    ' Create the Scanner UI elements
+    
+    With wsScanner
+        ' Scanner Input Area
+        .Range("A7").Value = "ID SCANNER"
+        .Range("A7").Font.Bold = True
+        .Range("A7").Font.Color = RGB(147, 197, 253)
+        
+        .Range("A8").Value = "Scan CAC or Enter ID Number:"
+        
+        ' Create input box
+        .Range("A9").Value = ""
+        .Range("A9:C9").Merge
+        .Range("A9").Interior.Color = RGB(255, 255, 255)
+        .Range("A9").Font.Color = RGB(0, 0, 0)
+        
+        ' Personnel Details Display
+        .Range("A12").Value = "PERSONNEL DETAILS"
+        .Range("A12").Font.Bold = True
+        .Range("A12").Font.Color = RGB(147, 197, 253)
+        
+        ' Create labels for personnel details
+        .Range("A13").Value = "ID Number:"
+        .Range("A14").Value = "Name:"
+        .Range("A15").Value = "Rank:"
+        .Range("A16").Value = "Branch:"
+        .Range("A17").Value = "Unit:"
+        .Range("A18").Value = "DOB:"
+        .Range("A19").Value = "Status:"
+        
+        ' Create placeholders for data
+        .Range("B13:D13").Merge
+        .Range("B14:D14").Merge
+        .Range("B15:D15").Merge
+        .Range("B16:D16").Merge
+        .Range("B17:D17").Merge
+        .Range("B18:D18").Merge
+        .Range("B19:D19").Merge
+        
+        ' Accountability Status
+        .Range("E7").Value = "ACCOUNTABILITY STATUS"
+        .Range("E7").Font.Bold = True
+        .Range("E7").Font.Color = RGB(147, 197, 253)
+        
+        .Range("E8").Value = "Accounted:"
+        .Range("G8").Value = GetAccountedCount()
+        
+        .Range("E9").Value = "Total:"
+        .Range("G9").Value = GetTotalPersonnel()
+        
+        .Range("E10").Value = "Completion:"
+        .Range("G10").Value = GetAccountabilityPercentage() & "%"
+        
+        ' Location selection
+        .Range("A22").Value = "SCAN LOCATION OPTIONS"
+        .Range("A22").Font.Bold = True
+        .Range("A22").Font.Color = RGB(147, 197, 253)
+    End With
+    
+    ' Add scan button
+    With wsScanner.Buttons.Add(370, 86, 80, 25)
+        .OnAction = "ScanIDCard"
+        .Caption = "SCAN"
+        .Name = "ScanButton"
+    End With
+    
+    ' Add location buttons
+    Dim locations As Variant
+    Dim i As Long
+    
+    locations = Array("MAIN BASE - PERSCO STATION", "DEPLOYMENT TRANSIT - BUS", _
+                     "DEPLOYMENT TRANSIT - AIRCRAFT", "FIELD EXERCISE - TACTICAL OPS", _
+                     "FOB ALPHA - ENTRY CONTROL")
+    
+    For i = 0 To UBound(locations)
+        With wsScanner.Buttons.Add(96, 350 + (i * 30), 200, 25)
+            .OnAction = "ChangeLocation"
+            .Caption = locations(i)
+            .Name = "LocationBtn" & i
+        End With
+    Next i
+    
+    ' Add navigation buttons
+    With wsScanner.Buttons.Add(96, 86, 80, 25)
+        .OnAction = "NavigateToDashboard"
+        .Caption = "DASHBOARD"
+        .Name = "DashboardBtn"
+    End With
+    
+    With wsScanner.Buttons.Add(200, 86, 80, 25)
+        .OnAction = "NavigateToReports"
+        .Caption = "REPORTS"
+        .Name = "ReportsBtn"
+    End With
+    
+    ' Register input box event
+    wsScanner.Range("A9").Select
+End Sub
+
+Sub ScanIDCard()
+    ' Process the scanned/entered ID card
+    
+    Dim idNumber As String
+    Dim row As Long
+    Dim found As Boolean
+    Dim lastRow As Long
+    
+    ' Get the ID from the input box
+    idNumber = wsScanner.Range("A9").Value
+    
+    ' Validate input
+    If Trim(idNumber) = "" Then
+        MsgBox "Please scan or enter an ID number.", vbExclamation, "MPAS Scanner"
+        Exit Sub
+    End If
+    
+    ' Look up the ID in the data sheet
+    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    found = False
+    
+    For row = 2 To lastRow
+        If wsData.Cells(row, "A").Value = idNumber Then
+            found = True
+            Exit For
+        End If
+    Next row
+    
+    If found Then
+        ' Display personnel details
+        wsScanner.Range("B13").Value = wsData.Cells(row, "A").Value ' ID
+        wsScanner.Range("B14").Value = wsData.Cells(row, "B").Value & " " & wsData.Cells(row, "C").Value ' Name
+        wsScanner.Range("B15").Value = wsData.Cells(row, "D").Value ' Rank
+        wsScanner.Range("B16").Value = wsData.Cells(row, "E").Value ' Branch
+        wsScanner.Range("B17").Value = wsData.Cells(row, "F").Value ' Unit
+        wsScanner.Range("B18").Value = wsData.Cells(row, "G").Value ' DOB
+        
+        ' Update status to Accounted
+        wsData.Cells(row, "O").Value = "ACCOUNTED"
+        wsScanner.Range("B19").Value = "ACCOUNTED"
+        wsScanner.Range("B19").Font.Color = RGB(16, 185, 129)
+        
+        ' Record timestamp and location
+        wsData.Cells(row, "P").Value = Now ' Timestamp
+        wsData.Cells(row, "Q").Value = currentLocation ' Location
+        
+        ' Update stats
+        UpdateDashboardStats
+        wsScanner.Range("G8").Value = GetAccountedCount()
+        wsScanner.Range("G9").Value = GetTotalPersonnel()
+        wsScanner.Range("G10").Value = GetAccountabilityPercentage() & "%"
+        
+        ' Show success message
+        MsgBox "Personnel successfully accounted for." & vbCrLf & vbCrLf & _
+               "Name: " & wsData.Cells(row, "B").Value & " " & wsData.Cells(row, "C").Value & vbCrLf & _
+               "ID: " & wsData.Cells(row, "A").Value, _
+               vbInformation, "MPAS Scanner"
+    Else
+        ' ID not found
+        MsgBox "ID number not found in the database.", vbExclamation, "MPAS Scanner"
+    End If
+    
+    ' Clear input box for next scan
+    wsScanner.Range("A9").Value = ""
+    wsScanner.Range("A9").Select
+End Sub
+
+Sub ChangeLocation()
+    ' Change the current location based on button press
+    
+    Dim btn As Button
+    Set btn = Application.Caller
+    
+    ' Extract location from button caption
+    currentLocation = btn.Caption
+    
+    ' Update location display
+    wsDashboard.Range("B5").Value = currentLocation
+    wsScanner.Range("B5").Value = currentLocation
+    wsReports.Range("B5").Value = currentLocation
+    
+    MsgBox "Location changed to: " & currentLocation, vbInformation, "MPAS Location Update"
+End Sub
+
+' ===================================================
+' REPORTS PROCEDURES
+' ===================================================
+
+Sub CreateReportsUI()
+    ' Create the Reports UI elements
+    
+    With wsReports
+        ' Report Options
+        .Range("A7").Value = "REPORT OPTIONS"
+        .Range("A7").Font.Bold = True
+        .Range("A7").Font.Color = RGB(147, 197, 253)
+        
+        ' Create report option checkboxes
+        .Range("A8").Value = "Daily Accountability Report"
+        .Range("A9").Value = "Unit Breakdown Report"
+        .Range("A10").Value = "Missing Personnel Report"
+        .Range("A11").Value = "Location History Report"
+        
+        ' Checkbox indicators (manual in Excel)
+        .Range("D8").Value = "☑"
+        .Range("D9").Value = "☑"
+        .Range("D10").Value = "☑"
+        .Range("D11").Value = "☐"
+        
+        ' Accountability summary
+        .Range("E7").Value = "ACCOUNTABILITY SUMMARY"
+        .Range("E7").Font.Bold = True
+        .Range("E7").Font.Color = RGB(147, 197, 253)
+        
+        .Range("E8").Value = "Total Personnel:"
+        .Range("G8").Value = GetTotalPersonnel()
+        
+        .Range("E9").Value = "Accounted For:"
+        .Range("G9").Value = GetAccountedCount()
+        
+        .Range("E10").Value = "Pending:"
+        .Range("G10").Value = GetTotalPersonnel() - GetAccountedCount()
+        
+        .Range("E11").Value = "Completion Rate:"
+        .Range("G11").Value = GetAccountabilityPercentage() & "%"
+        
+        ' Recent Reports
+        .Range("A15").Value = "RECENT REPORTS"
+        .Range("A15").Font.Bold = True
+        .Range("A15").Font.Color = RGB(147, 197, 253)
+        
+        ' Create header row for reports table
+        .Range("A16").Value = "REPORT ID"
+        .Range("B16").Value = "DATE"
+        .Range("C16").Value = "TYPE"
+        .Range("D16").Value = "GENERATED BY"
+        .Range("E16").Value = "STATUS"
+        
+        .Range("A16:E16").Font.Bold = True
+        .Range("A16:E16").Interior.Color = RGB(31, 41, 55)
+        
+        ' Add sample reports
+        .Range("A17").Value = "RPT-23498"
+        .Range("B17").Value = Format(Date - 1, "yyyy-mm-dd")
+        .Range("C17").Value = "DAILY"
+        .Range("D17").Value = "SYSTEM ADMIN"
+        .Range("E17").Value = "COMPLETE"
+        
+        .Range("A18").Value = "RPT-23497"
+        .Range("B18").Value = Format(Date - 2, "yyyy-mm-dd")
+        .Range("C18").Value = "WEEKLY"
+        .Range("D18").Value = "SYSTEM ADMIN"
+        .Range("E18").Value = "COMPLETE"
+        
+        .Range("A19").Value = "RPT-23496"
+        .Range("B19").Value = Format(Date - 2, "yyyy-mm-dd")
+        .Range("C19").Value = "MISSING"
+        .Range("D19").Value = "SYSTEM ADMIN"
+        .Range("E19").Value = "COMPLETE"
+    End With
+    
+    ' Add report generation button
+    With wsReports.Buttons.Add(96, 220, 150, 30)
+        .OnAction = "GenerateReport"
+        .Caption = "GENERATE REPORT"
+        .Name = "GenReportBtn"
+    End With
+    
+    ' Add navigation buttons
+    With wsReports.Buttons.Add(96, 86, 80, 25)
+        .OnAction = "NavigateToDashboard"
+        .Caption = "DASHBOARD"
+        .Name = "DashboardBtn2"
+    End With
+    
+    With wsReports.Buttons.Add(200, 86, 80, 25)
+        .OnAction = "NavigateToScanner"
+        .Caption = "ID SCANNER"
+        .Name = "ScannerBtn"
+    End With
+End Sub
+
+Sub GenerateReport()
+    ' Generate a new report based on selected options
+    
+    Dim reportType As String
+    Dim reportID As String
+    
+    ' Determine report type based on checked boxes (this is simplified)
+    If wsReports.Range("D8").Value = "☑" Then
+        reportType = "DAILY"
+    ElseIf wsReports.Range("D9").Value = "☑" Then
+        reportType = "UNIT"
+    ElseIf wsReports.Range("D10").Value = "☑" Then
+        reportType = "MISSING"
+    ElseIf wsReports.Range("D11").Value = "☑" Then
+        reportType = "LOCATION"
+    Else
+        reportType = "DAILY" ' Default
+    End If
+    
+    ' Generate report ID
+    reportID = "RPT-" & Format(Int((999999 - 100000 + 1) * Rnd + 100000), "000000")
+    
+    ' For now, just show a message (in a real app, this would create a report)
+    MsgBox "Generating " & reportType & " Report" & vbCrLf & vbCrLf & _
+           "Report ID: " & reportID & vbCrLf & _
+           "Date: " & Format(Now, "yyyy-mm-dd") & vbCrLf & _
+           "Location: " & currentLocation & vbCrLf & _
+           "Accountability: " & GetAccountabilityPercentage() & "%", _
+           vbInformation, "MPAS Report Generation"
+    
+   
+    ' Add to recent reports (in a real app, this would add to a reports table)
+    Dim lastRow As Long
+    lastRow = wsReports.Cells(wsReports.Rows.Count, "A").End(xlUp).Row
+    
+    wsReports.Cells(lastRow + 1, 1).Value = reportID
+    wsReports.Cells(lastRow + 1, 2).Value = Format(Date, "yyyy-mm-dd")
+    wsReports.Cells(lastRow + 1, 3).Value = reportType
+    wsReports.Cells(lastRow + 1, 4).Value = "CURRENT USER"
+    wsReports.Cells(lastRow + 1, 5).Value = "COMPLETE"
+End Sub
+
+' ===================================================
+' NAVIGATION PROCEDURES
+' ===================================================
+
+Sub NavigateToDashboard()
+    ' Navigate to the Dashboard sheet
+    wsDashboard.Activate
+    UpdateDashboardStats
+End Sub
+
+Sub NavigateToScanner()
+    ' Navigate to the Scanner sheet
+    wsScanner.Activate
+    wsScanner.Range("A9").Select
+    
+    ' Update scanner stats
+    wsScanner.Range("G8").Value = GetAccountedCount()
+    wsScanner.Range("G9").Value = GetTotalPersonnel()
+    wsScanner.Range("G10").Value = GetAccountabilityPercentage() & "%"
+End Sub
+
+Sub NavigateToReports()
+    ' Navigate to the Reports sheet
+    wsReports.Activate
+    
+    ' Update reports stats
+    wsReports.Range("G8").Value = GetTotalPersonnel()
+    wsReports.Range("G9").Value = GetAccountedCount()
+    wsReports.Range("G10").Value = GetTotalPersonnel() - GetAccountedCount()
+    wsReports.Range("G11").Value = GetAccountabilityPercentage() & "%"
+End Sub
+
+' ===================================================
+' SETUP THE DATA STRUCTURE
+' ===================================================
+
+Sub SetupDataSheet()
+    ' Create and populate the data structure if it doesn't exist
+    
+    If WorksheetExists("Data") = False Then
+        ' Create the sheet
+        ThisWorkbook.Sheets.Add.Name = "Data"
+        Set wsData = ThisWorkbook.Sheets("Data")
+    End If
+    
+    ' Create header row
+    With wsData
+        .Range("A1").Value = "ID_Number"
+        .Range("B1").Value = "FirstName"
+        .Range("C1").Value = "LastName"
+        .Range("D1").Value = "Rank"
+        .Range("E1").Value = "Branch"
+        .Range("F1").Value = "Unit"
+        .Range("G1").Value = "DOB"
+        .Range("H1").Value = "Gender"
+        .Range("I1").Value = "BloodType"
+        .Range("J1").Value = "IssueDate"
+        .Range("K1").Value = "ExpirationDate"
+        .Range("L1").Value = "Category"
+        .Range("M1").Value = "Designation"
+        .Range("N1").Value = "Clearance"
+        .Range("O1").Value = "Status"
+        .Range("P1").Value = "LastCheckIn"
+        .Range("Q1").Value = "LastLocation"
+        
+        .Range("A1:Q1").Font.Bold = True
+    End With
+    
+    ' Add sample data if the sheet is empty
+    If wsData.Cells(2, 1).Value = "" Then
+        AddSampleData
+    End If
+End Sub
+
+Sub AddSampleData()
+    ' Add sample personnel data
+    
+    Dim data As Variant
+    Dim i As Long
+    
+    ' Sample data array [ID, FirstName, LastName, Rank, Branch, Unit, DOB, Gender, BloodType, IssueDate, ExpDate, Category, Designation, Clearance]
+    data = Array( _
+        Array("USAF-78234511", "Michael", "Rodriguez", "TSgt", "USAF", "437th APS", "05/12/1988", "M", "O+", "01/15/2023", "01/14/2027", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USAF-63317892", "Sarah", "Johnson", "SSgt", "USAF", "56th SFS", "09/23/1992", "F", "A-", "03/10/2022", "03/09/2026", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USAF-91762385", "Alexander", "Chen", "Capt", "USAF", "21st MDG", "11/05/1990", "M", "B+", "06/21/2024", "06/20/2028", "Active Duty", "Officer", "TS/SCI"), _
+        Array("USAF-82651093", "Jasmine", "Williams", "SrA", "USAF", "56th SFS", "02/17/1995", "F", "AB+", "12/03/2023", "12/02/2027", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USAF-55143628", "Robert", "Taylor", "MSgt", "USAF", "437th APS", "05/17/1984", "M", "O-", "09/08/2022", "09/07/2026", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USMC-77124568", "Thomas", "Garcia", "Sgt", "USMC", "1st MarDiv", "07/30/1991", "M", "A+", "08/14/2023", "08/13/2027", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USA-39245170", "Maria", "Gonzalez", "SPC", "USA", "82nd ABN", "04/12/1994", "F", "B-", "02/19/2024", "02/18/2028", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USN-67431982", "Daniel", "Smith", "PO2", "USN", "NMCB-1", "12/08/1993", "M", "O+", "10/25/2023", "10/24/2027", "Active Duty", "Enlisted", "SECRET"), _
+        Array("USAF-29853647", "Jennifer", "Brown", "1Lt", "USAF", "21st MDG", "08/21/1992", "F", "AB-", "05/12/2023", "05/11/2027", "Active Duty", "Officer", "SECRET"), _
+        Array("USA-42175693", "Christopher", "Martinez", "SGT", "USA", "82nd ABN", "03/09/1990", "M", "A+", "07/30/2022", "07/29/2026", "Active Duty", "Enlisted", "SECRET") _
+    )
+    
+    ' Add data to the sheet
+    For i = 0 To UBound(data)
+        wsData.Cells(i + 2, 1).Value = data(i)(0)  ' ID
+        wsData.Cells(i + 2, 2).Value = data(i)(1)  ' FirstName
+        wsData.Cells(i + 2, 3).Value = data(i)(2)  ' LastName
+        wsData.Cells(i + 2, 4).Value = data(i)(3)  ' Rank
+        wsData.Cells(i + 2, 5).Value = data(i)(4)  ' Branch
+        wsData.Cells(i + 2, 6).Value = data(i)(5)  ' Unit
+        wsData.Cells(i + 2, 7).Value = data(i)(6)  ' DOB
+        wsData.Cells(i + 2, 8).Value = data(i)(7)  ' Gender
+        wsData.Cells(i + 2, 9).Value = data(i)(8)  ' BloodType
+        wsData.Cells(i + 2, 10).Value = data(i)(9)  ' IssueDate
+        wsData.Cells(i + 2, 11).Value = data(i)(10) ' ExpDate
+        wsData.Cells(i + 2, 12).Value = data(i)(11) ' Category
+        wsData.Cells(i + 2, 13).Value = data(i)(12) ' Designation
+        wsData.Cells(i + 2, 14).Value = data(i)(13) ' Clearance
+        
+        ' Set initial status
+        If i < 6 Then
+            wsData.Cells(i + 2, 15).Value = "ACCOUNTED"
+            wsData.Cells(i + 2, 16).Value = Now - (i / 24) ' Staggered timestamps from today
+            wsData.Cells(i + 2, 17).Value = "MAIN BASE - PERSCO STATION"
+        Else
+            wsData.Cells(i + 2, 15).Value = "PENDING"
+            wsData.Cells(i + 2, 16).Value = ""
+            wsData.Cells(i + 2, 17).Value = ""
+        End If
+    Next i
+    
+    ' Format the data sheet
+    wsData.UsedRange.Columns.AutoFit
+End Sub
+
+Function WorksheetExists(sheetName As String) As Boolean
+    ' Check if a worksheet exists in the workbook
+    
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets(sheetName)
+    On Error GoTo 0
+    WorksheetExists = Not ws Is Nothing
+End Function
+
+' ===================================================
+' AUTO-RUN ON WORKBOOK OPEN
+' ===================================================
+
+Sub Auto_Open()
+    ' Run when the workbook is opened
+    
+    ' Create required sheets if they don't exist
+    If Not WorksheetExists("Data") Then ThisWorkbook.Sheets.Add.Name = "Data"
+    If Not WorksheetExists("Dashboard") Then ThisWorkbook.Sheets.Add.Name = "Dashboard"
+    If Not WorksheetExists("Scanner") Then ThisWorkbook.Sheets.Add.Name = "Scanner"
+    If Not WorksheetExists("Reports") Then ThisWorkbook.Sheets.Add.Name = "Reports"
+    
+    ' Set up the system
+    SetupDataSheet
+    InitializeMPAS
+End Sub
+
+' ===================================================
+' DATA VALIDATION AND HANDLERS
+' ===================================================
+
+Sub Worksheet_Change(ByVal Target As Range)
+    ' This procedure needs to be copied to the Scanner sheet module
+    
+    ' Check if the changed cell is the ID input cell
+    If Target.Address = "$A$9" Then
+        If Target.Value <> "" Then
+            ScanIDCard
+        End If
+    End If
+End Sub
+
+' For proper functionality, open the VBA Editor and place the Worksheet_Chang
